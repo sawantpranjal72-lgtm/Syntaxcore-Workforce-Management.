@@ -1,0 +1,96 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: syntaxcore-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-syntaxcore_workforce}
+      POSTGRES_USER: ${DB_USERNAME:-syntaxcore}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-syntaxcore}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - syntaxcore-net
+    # Not exposed to the host on purpose — only the backend container
+    # talks to it, over the internal docker network.
+
+  backend:
+    build:
+      context: ./backend
+    container_name: syntaxcore-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-syntaxcore_workforce}
+      DB_USERNAME: ${DB_USERNAME:-syntaxcore}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-604800000}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      FRONTEND_URL: ${FRONTEND_URL}
+      BACKEND_URL: ${BACKEND_URL}
+      CORS_ORIGINS: ${FRONTEND_URL}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - backend-uploads:/app/uploads
+      - backend-logs:/app/logs
+    networks:
+      - syntaxcore-net
+    # Not published to the host — nginx is the only public entrypoint.
+    # Uncomment during initial setup/debugging if you need direct access:
+    # ports:
+    #   - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: syntaxcore-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Mount your real certs here — see DEPLOYMENT.md. Do NOT bake certs
+      # into the image; this keeps certbot renewal working without rebuilds.
+      - ./ssl:/etc/nginx/ssl:ro
+      - certbot-webroot:/var/www/certbot:ro
+    networks:
+      - syntaxcore-net
+
+  # Optional: automates certificate issuance/renewal via Let's Encrypt.
+  # See DEPLOYMENT.md for the one-time issuance command; this service just
+  # handles silent renewal every 12 hours after that.
+  certbot:
+    image: certbot/certbot
+    container_name: syntaxcore-certbot
+    volumes:
+      - ./ssl:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h; done"
+
+networks:
+  syntaxcore-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  backend-uploads:
+  backend-logs:
+  certbot-webroot:
